@@ -1,0 +1,25 @@
+# Build artifacts
+/target
+
+# Large model files (download separately)
+/models/
+
+# Runtime data
+/data/
+
+# Binary cache files
+*.bin
+
+# Machine-specific linker wrapper
+/.cargo/config.toml
+/link_wrapper.bat
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# IDE files
+/.vscode
+/.idea
+*.swp
+*.swo

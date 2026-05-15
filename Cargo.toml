@@ -1,0 +1,45 @@
+[package]
+name = "semantic-search-lite"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Lightweight semantic search RAG engine powered by EmbeddingGemma-300m"
+
+[dependencies]
+# AI inference
+ort = { version = "2.0.0-rc.12", features = ["xnnpack"] }
+tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
+ndarray = "0.17"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = { version = "2.0.1", features = ["serde"] }
+toml = "0.8"
+
+# Concurrency & performance
+rayon = "1.11"
+dashmap = "6.1"
+parking_lot = "0.12"
+lru = "0.16"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+tabled = "0.17"
+indicatif = "0.17"
+
+# Utilities
+anyhow = "1"
+thiserror = "2"
+chrono = "0.4"
+dirs = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+fuzzy-matcher = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
