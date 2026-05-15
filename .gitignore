@@ -13,6 +13,7 @@
 # Machine-specific linker wrapper
 /.cargo/config.toml
 /link_wrapper.bat
+/setup-vs-tools.bat
 
 # OS files
 Thumbs.db
