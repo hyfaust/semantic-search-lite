@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -6,15 +7,28 @@ use bincode::{Decode, Encode};
 
 const CACHE_FILE_NAME: &str = "embeddings.cache";
 
+/// Compute a content hash for an embed text string.
+pub fn compute_content_hash(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Debug, Clone, Encode, Decode)]
 struct CacheEntry {
     key: String,
+    content_hash: u64,
     embedding: Vec<f32>,
 }
 
+/// Persistent embedding cache with content-hash-based invalidation.
+///
+/// Stores `(doc_id → (content_hash, embedding))` pairs.
+/// When the content of a document changes, its hash changes and the cached
+/// embedding is automatically considered stale.
 #[derive(Debug)]
 pub struct EmbeddingCache {
-    cache: HashMap<String, Vec<f32>>,
+    cache: HashMap<String, (u64, Vec<f32>)>,
     cache_path: PathBuf,
     dirty: bool,
 }
@@ -30,23 +44,23 @@ impl EmbeddingCache {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&Vec<f32>> {
-        self.cache.get(key)
+    /// Returns the cached embedding if the content hash matches.
+    pub fn get(&self, key: &str, content_hash: u64) -> Option<&[f32]> {
+        self.cache.get(key).and_then(|(hash, emb)| {
+            if *hash == content_hash && Self::is_valid_embedding(emb) {
+                Some(emb.as_slice())
+            } else {
+                None
+            }
+        })
     }
 
-    pub fn insert(&mut self, key: String, embedding: Vec<f32>) {
+    /// Insert or update a cached embedding.
+    pub fn insert(&mut self, key: String, content_hash: u64, embedding: Vec<f32>) {
         if Self::is_valid_embedding(&embedding) {
-            self.cache.insert(key, embedding);
+            self.cache.insert(key, (content_hash, embedding));
             self.dirty = true;
         }
-    }
-
-    pub fn remove(&mut self, key: &str) -> Option<Vec<f32>> {
-        let result = self.cache.remove(key);
-        if result.is_some() {
-            self.dirty = true;
-        }
-        result
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
@@ -61,6 +75,12 @@ impl EmbeddingCache {
         self.cache.is_empty()
     }
 
+    /// Clear all entries (used for forced full rebuild).
+    pub fn clear(&mut self) {
+        self.cache.clear();
+        self.dirty = true;
+    }
+
     pub fn save(&mut self) -> Result<()> {
         if !self.dirty {
             return Ok(());
@@ -72,8 +92,9 @@ impl EmbeddingCache {
         let entries: Vec<CacheEntry> = self
             .cache
             .iter()
-            .map(|(k, v)| CacheEntry {
+            .map(|(k, (hash, v))| CacheEntry {
                 key: k.clone(),
+                content_hash: *hash,
                 embedding: v.clone(),
             })
             .collect();
@@ -85,7 +106,7 @@ impl EmbeddingCache {
         Ok(())
     }
 
-    fn load_from_file(path: &Path) -> Result<HashMap<String, Vec<f32>>> {
+    fn load_from_file(path: &Path) -> Result<HashMap<String, (u64, Vec<f32>)>> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("Failed to read cache file: {:?}", path))?;
         let (entries, _): (Vec<CacheEntry>, _) =
@@ -94,7 +115,7 @@ impl EmbeddingCache {
         let mut map = HashMap::with_capacity(entries.len());
         for entry in entries {
             if Self::is_valid_embedding(&entry.embedding) {
-                map.insert(entry.key, entry.embedding);
+                map.insert(entry.key, (entry.content_hash, entry.embedding));
             }
         }
         Ok(map)

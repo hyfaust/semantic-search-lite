@@ -1,19 +1,25 @@
 # Build artifacts
 /target
+*.exe
+*.pdb
+*.dll
+*.lib
 
 # Large model files (download separately)
 /models/
 
 # Runtime data
 /data/
-
-# Binary cache files
 *.bin
+*.cache
 
-# Machine-specific linker wrapper
-/.cargo/config.toml
+# Machine-specific MSVC toolchain config
+/.cargo/
 /link_wrapper.bat
 /setup-vs-tools.bat
+
+# AI assistant local data
+/.qwen/
 
 # OS files
 Thumbs.db

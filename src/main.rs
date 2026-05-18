@@ -1,17 +1,14 @@
-mod ai_core;
-mod search;
-mod store;
-
 use std::path::{Path, PathBuf};
 
-use ai_core::embedding::gemma::EmbeddingGemmaModel;
-use ai_core::embedding::EmbeddingModel as _;
-use ai_core::OnnxModelConfig;
+use semantic_search_lite::ai_core::embedding::gemma::EmbeddingGemmaModel;
+use semantic_search_lite::ai_core::embedding::EmbeddingModel as _;
+use semantic_search_lite::ai_core::OnnxModelConfig;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use search::engine::SearchEngine;
-use search::types::SearchQuery;
-use store::document::{Document, DocumentStore};
+use semantic_search_lite::search::engine::SearchEngine;
+use semantic_search_lite::search::types::SearchQuery;
+use semantic_search_lite::store::document::{Document, DocumentStore};
+use semantic_search_lite::store::embedding_cache::EmbeddingCache;
 
 #[derive(Parser)]
 #[command(name = "ssl")]
@@ -46,6 +43,17 @@ enum Commands {
         recursive: bool,
     },
 
+    /// Import documents from a kb-builder JSONL file
+    Import {
+        /// Path to the JSONL file (e.g. documents.jsonl from kb-builder)
+        #[arg(short, long)]
+        path: String,
+
+        /// Skip embedding computation (import text only)
+        #[arg(long, default_value = "false")]
+        skip_embeddings: bool,
+    },
+
     /// Search the knowledge base
     Search {
         /// Search query
@@ -64,8 +72,12 @@ enum Commands {
     /// Show statistics about the knowledge base
     Stats,
 
-    /// Recompute all embeddings
-    Rebuild,
+    /// Recompute embeddings (incremental by default, use --force for full recompute)
+    Rebuild {
+        /// Force recompute all embeddings, ignoring cache
+        #[arg(short, long, default_value = "false")]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -81,13 +93,17 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Add { path, recursive } => cmd_add(&data_dir, &cli.model_dir, &path, recursive),
+        Commands::Import {
+            path,
+            skip_embeddings,
+        } => cmd_import(&data_dir, &cli.model_dir, &path, skip_embeddings),
         Commands::Search {
             query,
             top_k,
             threshold,
         } => cmd_search(&data_dir, &cli.model_dir, &query, top_k, threshold),
         Commands::Stats => cmd_stats(&data_dir),
-        Commands::Rebuild => cmd_rebuild(&data_dir, &cli.model_dir),
+        Commands::Rebuild { force } => cmd_rebuild(&data_dir, &cli.model_dir, force),
     }
 }
 
@@ -113,6 +129,12 @@ fn create_model(model_dir: &str) -> Result<EmbeddingGemmaModel> {
     let model = EmbeddingGemmaModel::new(config)?;
     tracing::info!("Model loaded successfully");
     Ok(model)
+}
+
+fn create_model_factory(
+    model_dir: &str,
+) -> impl Fn() -> Result<EmbeddingGemmaModel> + '_ {
+    move || create_model(model_dir)
 }
 
 // ── Add command ──────────────────────────────────────────────────────────────
@@ -165,8 +187,11 @@ fn cmd_add(data_dir: &Path, model_dir: &str, path: &str, recursive: bool) -> Res
     if added > 0 {
         println!("\nComputing embeddings for {} new document(s)...", added);
         let mut model = create_model(model_dir)?;
-        let computed = store.compute_missing_embeddings(&mut model)?;
+        let mut cache = EmbeddingCache::new(data_dir);
+        let factory = create_model_factory(model_dir);
+        let computed = store.compute_missing_embeddings(&mut model, &mut cache, 0, factory)?;
         store.save()?;
+        cache.save()?;
         println!("Indexed {} document(s), computed {} embedding(s)", added, computed);
     } else {
         println!("No new documents to add.");
@@ -291,14 +316,136 @@ fn cmd_stats(data_dir: &Path) -> Result<()> {
 
 // ── Rebuild command ──────────────────────────────────────────────────────────
 
-fn cmd_rebuild(data_dir: &Path, model_dir: &str) -> Result<()> {
+const SESSION_RESET_INTERVAL: usize = 100;
+
+fn cmd_rebuild(data_dir: &Path, model_dir: &str, force: bool) -> Result<()> {
     let mut store = DocumentStore::new(data_dir);
-    println!("Rebuilding embeddings for {} document(s)...", store.count());
+    let mut cache = EmbeddingCache::new(data_dir);
+
+    if force {
+        println!(
+            "Force rebuild: clearing embedding cache for {} document(s)...",
+            store.count()
+        );
+        cache.clear();
+    } else {
+        let stale = store.count_stale_embeddings();
+        let missing = store.count() - store.count_with_embeddings();
+        let need_compute = stale + missing;
+        if need_compute == 0 {
+            println!(
+                "All {} embeddings are up to date. Nothing to do.",
+                store.count()
+            );
+            return Ok(());
+        }
+        println!(
+            "Incremental rebuild: {} stale + {} missing = {} to compute (of {} total)",
+            stale,
+            missing,
+            need_compute,
+            store.count()
+        );
+    }
 
     let mut model = create_model(model_dir)?;
-    let computed = store.compute_missing_embeddings(&mut model)?;
-    store.save()?;
+    let factory = create_model_factory(model_dir);
 
-    println!("Done. Recomputed {} embedding(s).", computed);
+    let computed = store.compute_missing_embeddings(
+        &mut model,
+        &mut cache,
+        SESSION_RESET_INTERVAL,
+        factory,
+    )?;
+
+    // Drop model before saving to free memory
+    drop(model);
+
+    store.save()?;
+    cache.save()?;
+
+    println!("Done. Computed {} embedding(s).", computed);
+    Ok(())
+}
+
+// ── Import command ───────────────────────────────────────────────────────────
+
+/// A single line from kb-builder's JSONL output.
+#[derive(serde::Deserialize)]
+struct JsonlEntry {
+    id: String,
+    text: String,
+    title: Option<String>,
+    source_path: Option<String>,
+}
+
+fn cmd_import(data_dir: &Path, model_dir: &str, path: &str, skip_embeddings: bool) -> Result<()> {
+    let input = PathBuf::from(path);
+    if !input.exists() {
+        anyhow::bail!("File not found: {:?}", input);
+    }
+
+    let content = std::fs::read_to_string(&input)
+        .with_context(|| format!("Failed to read: {:?}", input))?;
+
+    let mut store = DocumentStore::new(data_dir);
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let entry: JsonlEntry = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Line {}: parse error: {}", line_num + 1, e);
+                continue;
+            }
+        };
+
+        if store.get(&entry.id).is_some() {
+            skipped += 1;
+            continue;
+        }
+
+        let mut doc = Document::new(entry.id, entry.text);
+        if let Some(title) = entry.title {
+            doc = doc.with_title(title);
+        }
+        if let Some(source_path) = entry.source_path {
+            doc = doc.with_source_path(source_path);
+        }
+
+        store.add(doc);
+        added += 1;
+    }
+
+    println!(
+        "Imported {} document(s), skipped {} existing",
+        added, skipped
+    );
+
+    if added > 0 && !skip_embeddings {
+        println!(
+            "Computing embeddings for {} new document(s)...",
+            added
+        );
+        let mut model = create_model(model_dir)?;
+        let mut cache = EmbeddingCache::new(data_dir);
+        let factory = create_model_factory(model_dir);
+        let computed = store.compute_missing_embeddings(&mut model, &mut cache, 0, factory)?;
+        store.save()?;
+        cache.save()?;
+        println!("Saved {} embedding(s).", computed);
+    } else if added > 0 {
+        store.save()?;
+        println!("Saved documents (embeddings skipped).");
+    } else {
+        println!("No new documents to import.");
+    }
+
     Ok(())
 }

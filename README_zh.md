@@ -6,6 +6,7 @@
 
 > 基于 EmbeddingGemma-300m 的轻量级语义搜索 RAG 引擎，完全运行在 CPU 上。
 
+
 semantic-search-lite 是一个本地优先的语义搜索引擎，使用 EmbeddingGemma-300m ONNX 模型进行文本向量化。它结合了向量相似度与模糊文本匹配的混合搜索、基于内容哈希的增量向量嵌入计算，以及基于 JSONL 的文档管理。
 
 ## 目录
