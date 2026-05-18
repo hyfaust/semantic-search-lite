@@ -238,6 +238,10 @@ cargo build
 cargo build --release
 ```
 
+## 致谢与声明
+
+本项目基于 [ZeroLaunch](https://github.com/ghost-him/ZeroLaunch-rs) 构建，基本完全采用原项目的实现逻辑，仅用于学习和个人使用。
+
 ## 许可证
 
 GPL-3.0

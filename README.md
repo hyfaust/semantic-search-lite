@@ -237,6 +237,10 @@ cargo build
 cargo build --release
 ```
 
+## Acknowledgments & Disclaimer
+
+This project is built upon [ZeroLaunch](https://github.com/ghost-him/ZeroLaunch-rs), adopting nearly all of its original implementation logic. It is intended solely for learning and personal use.
+
 ## License
 
 GPL-3.0
